@@ -4,6 +4,7 @@ export interface StoredFile {
   displayName: string
   mimeType: string
   uploadedAt: number
+  localId: string      // key into IndexedDB
 }
 
 export interface SubjectURL {

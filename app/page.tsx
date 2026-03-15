@@ -394,12 +394,28 @@ export default function Page() {
       }
 
       const data = await res.json()
+      const localId = crypto.randomUUID()
+
+      // Persist bytes to IndexedDB for later re-upload if Gemini file expires
+      try {
+        const { saveFileLocally } = await import('@/lib/filestore')
+        await saveFileLocally({
+          localId,
+          bytes: new Uint8Array(await file.arrayBuffer()),
+          filename: file.name,
+          mimeType: file.type,
+        })
+      } catch {
+        // Non-fatal: IndexedDB may be unavailable in some environments
+      }
+
       const storedFile: StoredFile = {
         geminiFileUri: data.uri,
         geminiFileName: data.name,
         displayName: data.displayName,
         mimeType: data.mimeType,
         uploadedAt: Date.now(),
+        localId,
       }
 
       setSubjects((prev) => ({
@@ -432,6 +448,13 @@ export default function Page() {
   }
 
   const removeFile = (subjectName: string, fileUri: string) => {
+    // Clean up IndexedDB bytes for the removed file
+    const storedFile = subjects[subjectName]?.files.find((f) => f.geminiFileUri === fileUri)
+    if (storedFile?.localId) {
+      import('@/lib/filestore').then(({ deleteLocalFile }) => {
+        deleteLocalFile(storedFile.localId).catch(() => {/* non-fatal */})
+      })
+    }
     setSubjects((prev) => ({
       ...prev,
       [subjectName]: {
@@ -439,6 +462,48 @@ export default function Page() {
         files: prev[subjectName].files.filter((f) => f.geminiFileUri !== fileUri),
       },
     }))
+  }
+
+  // ── Refresh expired Gemini files (> 47h old) by re-uploading from IndexedDB
+  const refreshExpiredFiles = async (
+    files: StoredFile[]
+  ): Promise<{ files: StoredFile[]; anyRefreshed: boolean }> => {
+    const EXPIRY_MS = 47 * 3600 * 1000
+    let anyRefreshed = false
+    const { getLocalFile } = await import('@/lib/filestore')
+
+    const updated = await Promise.all(
+      files.map(async (file) => {
+        if (Date.now() - file.uploadedAt <= EXPIRY_MS) return file
+        if (!file.localId) return file
+
+        const local = await getLocalFile(file.localId).catch(() => null)
+        if (!local) return file
+
+        try {
+          const blob = new Blob([local.bytes.buffer as ArrayBuffer], { type: local.mimeType })
+          const formData = new FormData()
+          formData.append('file', blob, local.filename)
+          formData.append('apiKey', apiKey)
+
+          const res = await fetch('/api/upload', { method: 'POST', body: formData })
+          if (!res.ok) return file
+
+          const data = await res.json()
+          anyRefreshed = true
+          return {
+            ...file,
+            geminiFileUri: data.uri,
+            geminiFileName: data.name,
+            uploadedAt: Date.now(),
+          } as StoredFile
+        } catch {
+          return file
+        }
+      })
+    )
+
+    return { files: updated, anyRefreshed }
   }
 
   // ── URL operations
@@ -497,6 +562,20 @@ export default function Page() {
     if (!currentSubject) return
     if (!hasMaterials) { showToast('Please add files or URLs first.', 'error'); return }
 
+    // Refresh any files older than 47h before generating
+    let filesToUse = currentSubject.files
+    if (currentSubject.files.some((f) => Date.now() - f.uploadedAt > 47 * 3600 * 1000)) {
+      showToast('Re-uploading expired files...', 'info')
+      const { files: refreshed, anyRefreshed } = await refreshExpiredFiles(currentSubject.files)
+      if (anyRefreshed) {
+        filesToUse = refreshed
+        setSubjects((prev) => ({
+          ...prev,
+          [activeSubject]: { ...prev[activeSubject], files: refreshed },
+        }))
+      }
+    }
+
     setSummaryOutput('')
     setSummaryStreaming(true)
     try {
@@ -504,7 +583,7 @@ export default function Page() {
         '/api/generate',
         {
           apiKey,
-          files: currentSubject.files,
+          files: filesToUse,
           urls: currentSubject.urls.map((u) => u.url),
           prompt: summaryFocus,
           mode: 'summary',
@@ -526,6 +605,20 @@ export default function Page() {
     if (!currentSubject) return
     if (!hasMaterials) { showToast('Please add files or URLs first.', 'error'); return }
 
+    // Refresh any files older than 47h before generating
+    let filesToUse = currentSubject.files
+    if (currentSubject.files.some((f) => Date.now() - f.uploadedAt > 47 * 3600 * 1000)) {
+      showToast('Re-uploading expired files...', 'info')
+      const { files: refreshed, anyRefreshed } = await refreshExpiredFiles(currentSubject.files)
+      if (anyRefreshed) {
+        filesToUse = refreshed
+        setSubjects((prev) => ({
+          ...prev,
+          [activeSubject]: { ...prev[activeSubject], files: refreshed },
+        }))
+      }
+    }
+
     setPodcastOutput('')
     setPodcastStreaming(true)
     try {
@@ -533,7 +626,7 @@ export default function Page() {
         '/api/generate',
         {
           apiKey,
-          files: currentSubject.files,
+          files: filesToUse,
           urls: currentSubject.urls.map((u) => u.url),
           prompt: podcastFocus,
           mode: 'podcast',
@@ -557,6 +650,20 @@ export default function Page() {
     if (!currentSubject) return
     if (!hasMaterials) { showToast('Please add files or URLs first.', 'error'); return }
 
+    // Refresh any files older than 47h before starting chat
+    let filesToUse = currentSubject.files
+    if (currentSubject.files.some((f) => Date.now() - f.uploadedAt > 47 * 3600 * 1000)) {
+      showToast('Re-uploading expired files...', 'info')
+      const { files: refreshed, anyRefreshed } = await refreshExpiredFiles(currentSubject.files)
+      if (anyRefreshed) {
+        filesToUse = refreshed
+        setSubjects((prev) => ({
+          ...prev,
+          [activeSubject]: { ...prev[activeSubject], files: refreshed },
+        }))
+      }
+    }
+
     setChatSessionActive(true)
     setChatStreaming(true)
 
@@ -576,7 +683,7 @@ export default function Page() {
         '/api/chat',
         {
           apiKey,
-          files: currentSubject.files,
+          files: filesToUse,
           urls: currentSubject.urls.map((u) => u.url),
           history: [],
           message: '',
