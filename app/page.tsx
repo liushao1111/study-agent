@@ -32,7 +32,7 @@ import {
   Mic,
   Key,
 } from 'lucide-react'
-import type { StoredFile, SubjectURL, Subject, ChatMessage } from '@/lib/types'
+import type { StoredFile, SubjectURL, Subject, ChatMessage, WikiPage } from '@/lib/types'
 
 // ─── TTS helper ──────────────────────────────────────────────────────────────
 function speak(text: string, enabled: boolean) {
@@ -145,6 +145,80 @@ function timeAgo(ts: number): string {
   return `${Math.floor(hrs / 24)}d ago`
 }
 
+// ─── WikiFileTree component ───────────────────────────────────────────────────
+function WikiFileTree({
+  pages,
+  selected,
+  onSelect,
+}: {
+  pages: Record<string, WikiPage>
+  selected: string | null
+  onSelect: (path: string) => void
+}) {
+  // Group by folder
+  const groups: Record<string, string[]> = { root: [] }
+  for (const path of Object.keys(pages)) {
+    const parts = path.split('/')
+    if (parts.length === 1) {
+      groups.root.push(path)
+    } else {
+      const folder = parts[0]
+      if (!groups[folder]) groups[folder] = []
+      groups[folder].push(path)
+    }
+  }
+
+  const folderIcons: Record<string, string> = {
+    sources: '📄',
+    concepts: '💡',
+    entities: '🏢',
+    syntheses: '🔗',
+  }
+
+  return (
+    <div className="space-y-1">
+      {/* Root files first (index.md, log.md) */}
+      {groups.root.map(path => (
+        <button
+          key={path}
+          onClick={() => onSelect(path)}
+          className={`w-full text-left px-2 py-1.5 rounded-lg text-xs flex items-center gap-2 transition-colors ${
+            selected === path ? 'bg-indigo-100 text-indigo-800 font-medium' : 'text-slate-600 hover:bg-slate-100'
+          }`}
+        >
+          <FileText className="w-3.5 h-3.5 flex-shrink-0" />
+          <span className="truncate">{path}</span>
+        </button>
+      ))}
+      {/* Folders */}
+      {Object.entries(groups)
+        .filter(([folder]) => folder !== 'root')
+        .map(([folder, paths]) => (
+          <div key={folder}>
+            <div className="flex items-center gap-1.5 px-2 py-1 text-xs font-semibold text-slate-500 uppercase tracking-wide mt-2">
+              <span>{folderIcons[folder] || '📁'}</span>
+              <span>{folder}</span>
+            </div>
+            {paths.map(path => {
+              const name = path.split('/').pop() || path
+              return (
+                <button
+                  key={path}
+                  onClick={() => onSelect(path)}
+                  className={`w-full text-left px-2 py-1.5 rounded-lg text-xs flex items-center gap-2 pl-5 transition-colors ${
+                    selected === path ? 'bg-indigo-100 text-indigo-800 font-medium' : 'text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  <span className="truncate">{name.replace('.md', '')}</span>
+                </button>
+              )
+            })}
+          </div>
+        ))}
+    </div>
+  )
+}
+
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 const LS_KEY = 'study-agent-state'
 
@@ -154,6 +228,7 @@ interface PersistedState {
   activeSubject: string
   chatHistories: Record<string, ChatMessage[]>
   ttsEnabled: boolean
+  wikiPages: Record<string, Record<string, WikiPage>>
 }
 
 function loadState(): PersistedState {
@@ -164,11 +239,15 @@ function loadState(): PersistedState {
       activeSubject: '',
       chatHistories: {},
       ttsEnabled: false,
+      wikiPages: {},
     }
   }
   try {
     const raw = localStorage.getItem(LS_KEY)
-    if (raw) return JSON.parse(raw)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      return { wikiPages: {}, ...parsed }
+    }
   } catch {}
   return {
     apiKey: '',
@@ -176,6 +255,7 @@ function loadState(): PersistedState {
     activeSubject: '',
     chatHistories: {},
     ttsEnabled: false,
+    wikiPages: {},
   }
 }
 
@@ -223,8 +303,19 @@ export default function Page() {
   const [chatHistories, setChatHistories] = useState<Record<string, ChatMessage[]>>({})
   const [ttsEnabled, setTtsEnabled] = useState(false)
 
+  // ── Wiki state
+  const [wikiPages, setWikiPages] = useState<Record<string, Record<string, WikiPage>>>({}) // subject -> pages
+  const [selectedWikiPage, setSelectedWikiPage] = useState<string | null>(null)
+  const [wikiTab, setWikiTab] = useState<'view' | 'query' | 'lint'>('view')
+  const [wikiQueryInput, setWikiQueryInput] = useState('')
+  const [wikiQueryOutput, setWikiQueryOutput] = useState('')
+  const [wikiQueryStreaming, setWikiQueryStreaming] = useState(false)
+  const [wikiIngestLoading, setWikiIngestLoading] = useState(false)
+  const [wikiLintResult, setWikiLintResult] = useState<{ healthScore: number; issues: { type: string; page: string; description: string; suggestion: string }[]; suggestions: string[] } | null>(null)
+  const [wikiLintLoading, setWikiLintLoading] = useState(false)
+
   // ── UI state
-  const [activeTab, setActiveTab] = useState<'summary' | 'podcast' | 'qa'>('summary')
+  const [activeTab, setActiveTab] = useState<'summary' | 'podcast' | 'qa' | 'wiki'>('summary')
   const [newSubjectName, setNewSubjectName] = useState('')
   const [renamingSubject, setRenamingSubject] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -260,6 +351,7 @@ export default function Page() {
     setActiveSubject(saved.activeSubject)
     setChatHistories(saved.chatHistories)
     setTtsEnabled(saved.ttsEnabled)
+    setWikiPages(saved.wikiPages || {})
     setMounted(true)
   }, [])
 
@@ -272,11 +364,12 @@ export default function Page() {
       activeSubject,
       chatHistories,
       ttsEnabled,
+      wikiPages,
     }
     try {
       localStorage.setItem(LS_KEY, JSON.stringify(state))
     } catch {}
-  }, [mounted, apiKey, subjects, activeSubject, chatHistories, ttsEnabled])
+  }, [mounted, apiKey, subjects, activeSubject, chatHistories, ttsEnabled, wikiPages])
 
   // ── Auto-scroll chat
   useEffect(() => {
@@ -779,6 +872,89 @@ export default function Page() {
     setChatSessionActive(false)
   }
 
+  // ── Wiki operations
+  const handleWikiIngest = async () => {
+    const subject = activeSubject
+    const subjectData = subjects[subject]
+    if (!subjectData) return
+
+    setWikiIngestLoading(true)
+    try {
+      const currentPages = wikiPages[subject] || {}
+      const res = await fetch('/api/wiki', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiKey,
+          operation: 'ingest',
+          files: subjectData.files,
+          wikiPages: currentPages,
+          subject,
+        }),
+      })
+      if (!res.ok) throw new Error(await res.text())
+      const data = await res.json()
+
+      const now = Date.now()
+      const updatedPages = { ...currentPages }
+      for (const [path, content] of Object.entries(data.pages as Record<string, string>)) {
+        updatedPages[path] = { path, content, updatedAt: now }
+      }
+
+      setWikiPages(prev => ({ ...prev, [subject]: updatedPages }))
+      // Select index.md by default
+      setSelectedWikiPage('index.md')
+      setToast({ message: `Wiki updated — ${Object.keys(data.pages).length} pages`, type: 'success' })
+    } catch (err) {
+      setToast({ message: err instanceof Error ? err.message : 'Wiki ingest failed', type: 'error' })
+    } finally {
+      setWikiIngestLoading(false)
+    }
+  }
+
+  const handleWikiQuery = async () => {
+    if (!wikiQueryInput.trim()) return
+    const subject = activeSubject
+    const currentPages = wikiPages[subject] || {}
+
+    setWikiQueryStreaming(true)
+    setWikiQueryOutput('')
+    try {
+      await streamFetch('/api/wiki', {
+        apiKey,
+        operation: 'query',
+        question: wikiQueryInput,
+        wikiPages: currentPages,
+        subject,
+      }, (chunk) => setWikiQueryOutput(prev => prev + chunk))
+    } catch (err) {
+      setToast({ message: err instanceof Error ? err.message : 'Query failed', type: 'error' })
+    } finally {
+      setWikiQueryStreaming(false)
+    }
+  }
+
+  const handleWikiLint = async () => {
+    const subject = activeSubject
+    const currentPages = wikiPages[subject] || {}
+
+    setWikiLintLoading(true)
+    try {
+      const res = await fetch('/api/wiki', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey, operation: 'lint', wikiPages: currentPages, subject }),
+      })
+      const data = await res.json()
+      setWikiLintResult(data)
+      setWikiTab('lint')
+    } catch (err) {
+      setToast({ message: err instanceof Error ? err.message : 'Lint failed', type: 'error' })
+    } finally {
+      setWikiLintLoading(false)
+    }
+  }
+
   // ── Download helper
   const downloadText = (content: string, filename: string) => {
     const blob = new Blob([content], { type: 'text/plain' })
@@ -1215,6 +1391,16 @@ export default function Page() {
                     {label}
                   </button>
                 ))}
+                <button
+                  onClick={() => setActiveTab('wiki')}
+                  className={`flex items-center gap-2 px-6 py-3.5 text-sm font-medium transition-colors flex-1 justify-center ${
+                    activeTab === 'wiki'
+                      ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50/50'
+                      : 'text-slate-500 hover:text-slate-700 hover:bg-slate-50'
+                  }`}
+                >
+                  📖 Wiki
+                </button>
               </div>
 
               {/* ── Summary Tab ── */}
@@ -1358,6 +1544,209 @@ export default function Page() {
                     <div className="text-center py-10 text-slate-400">
                       <Mic className="w-8 h-8 mx-auto mb-2 opacity-40" />
                       <p className="text-sm">Generate an engaging podcast-style narration</p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── Wiki Tab ── */}
+              {activeTab === 'wiki' && (
+                <div className="flex flex-col h-full">
+                  {/* Wiki toolbar */}
+                  <div className="flex items-center gap-3 p-4 border-b border-slate-200 bg-white">
+                    <div className="flex items-center gap-2 mr-auto">
+                      <BookOpen className="w-5 h-5 text-indigo-600" />
+                      <span className="font-semibold text-slate-800">Knowledge Wiki</span>
+                      {Object.keys(wikiPages[activeSubject] || {}).length > 0 && (
+                        <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">
+                          {Object.keys(wikiPages[activeSubject] || {}).length} pages
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => setWikiTab('view')}
+                      className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${wikiTab === 'view' ? 'bg-indigo-100 text-indigo-700 font-medium' : 'text-slate-600 hover:bg-slate-100'}`}
+                    >
+                      Browse
+                    </button>
+                    <button
+                      onClick={() => setWikiTab('query')}
+                      className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${wikiTab === 'query' ? 'bg-indigo-100 text-indigo-700 font-medium' : 'text-slate-600 hover:bg-slate-100'}`}
+                    >
+                      Query
+                    </button>
+                    <button
+                      onClick={handleWikiLint}
+                      disabled={wikiLintLoading || Object.keys(wikiPages[activeSubject] || {}).length === 0}
+                      className="px-3 py-1.5 text-sm rounded-lg text-slate-600 hover:bg-slate-100 disabled:opacity-40 transition-colors flex items-center gap-1.5"
+                    >
+                      {wikiLintLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                      Lint
+                    </button>
+                    <button
+                      onClick={handleWikiIngest}
+                      disabled={wikiIngestLoading || !subjects[activeSubject]?.files?.length}
+                      className="px-4 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium disabled:opacity-40 transition-colors flex items-center gap-2"
+                    >
+                      {wikiIngestLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                      Ingest Materials
+                    </button>
+                  </div>
+
+                  {/* Empty state */}
+                  {Object.keys(wikiPages[activeSubject] || {}).length === 0 && wikiTab !== 'lint' && (
+                    <div className="flex-1 flex flex-col items-center justify-center text-center p-12">
+                      <BookOpen className="w-12 h-12 text-slate-300 mb-4" />
+                      <h3 className="text-lg font-semibold text-slate-700 mb-2">Wiki is empty</h3>
+                      <p className="text-slate-500 text-sm max-w-sm mb-6">
+                        Upload files to this subject and click &ldquo;Ingest Materials&rdquo; to build your knowledge wiki.
+                        The AI will create structured pages, cross-references, and a running log.
+                      </p>
+                      <button
+                        onClick={handleWikiIngest}
+                        disabled={wikiIngestLoading || !subjects[activeSubject]?.files?.length}
+                        className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-medium disabled:opacity-40 transition-colors flex items-center gap-2"
+                      >
+                        {wikiIngestLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                        Build Wiki from Materials
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Browse mode: file tree + viewer */}
+                  {wikiTab === 'view' && Object.keys(wikiPages[activeSubject] || {}).length > 0 && (
+                    <div className="flex flex-1 overflow-hidden" style={{ minHeight: '500px' }}>
+                      {/* File tree */}
+                      <div className="w-56 flex-shrink-0 border-r border-slate-200 bg-slate-50 overflow-y-auto p-3">
+                        <WikiFileTree
+                          pages={wikiPages[activeSubject] || {}}
+                          selected={selectedWikiPage}
+                          onSelect={setSelectedWikiPage}
+                        />
+                      </div>
+                      {/* Page viewer */}
+                      <div className="flex-1 overflow-y-auto p-6">
+                        {selectedWikiPage && wikiPages[activeSubject]?.[selectedWikiPage] ? (
+                          <div>
+                            <div className="flex items-center justify-between mb-4">
+                              <span className="text-xs text-slate-400">{selectedWikiPage}</span>
+                              <span className="text-xs text-slate-400">
+                                Updated {timeAgo(wikiPages[activeSubject][selectedWikiPage].updatedAt)}
+                              </span>
+                            </div>
+                            <div
+                              className="prose prose-slate max-w-none prose-content text-sm text-slate-800"
+                              dangerouslySetInnerHTML={{ __html: renderMarkdown(wikiPages[activeSubject][selectedWikiPage].content) }}
+                            />
+                          </div>
+                        ) : (
+                          <div className="text-slate-400 text-sm">Select a page from the tree</div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Query mode */}
+                  {wikiTab === 'query' && (
+                    <div className="flex flex-col flex-1 overflow-hidden" style={{ minHeight: '500px' }}>
+                      <div className="flex gap-3 p-4 border-b border-slate-200">
+                        <input
+                          value={wikiQueryInput}
+                          onChange={e => setWikiQueryInput(e.target.value)}
+                          onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleWikiQuery()}
+                          placeholder="Ask a question about your wiki..."
+                          className="flex-1 px-4 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
+                          disabled={wikiQueryStreaming}
+                        />
+                        <button
+                          onClick={handleWikiQuery}
+                          disabled={wikiQueryStreaming || !wikiQueryInput.trim()}
+                          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-medium disabled:opacity-40 flex items-center gap-2"
+                        >
+                          {wikiQueryStreaming ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                          Ask
+                        </button>
+                      </div>
+                      {wikiQueryOutput && (
+                        <div className="flex-1 overflow-y-auto p-6">
+                          <div
+                            className="prose prose-slate max-w-none prose-content text-sm text-slate-800"
+                            dangerouslySetInnerHTML={{ __html: renderMarkdown(wikiQueryOutput) }}
+                          />
+                          {!wikiQueryStreaming && (
+                            <button
+                              onClick={() => {
+                                // Save answer as wiki page
+                                const path = `syntheses/${Date.now()}.md`
+                                const page = { path, content: wikiQueryOutput, updatedAt: Date.now() }
+                                setWikiPages(prev => ({
+                                  ...prev,
+                                  [activeSubject]: { ...(prev[activeSubject] || {}), [path]: page }
+                                }))
+                                setToast({ message: 'Saved to wiki as synthesis page', type: 'success' })
+                              }}
+                              className="mt-4 px-4 py-2 text-sm border border-slate-200 rounded-xl text-slate-600 hover:bg-slate-50 flex items-center gap-2"
+                            >
+                              <Download className="w-4 h-4" />
+                              Save to Wiki
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Lint mode */}
+                  {wikiTab === 'lint' && wikiLintResult && (
+                    <div className="flex-1 overflow-y-auto p-6">
+                      <div className="flex items-center gap-4 mb-6">
+                        <div className="text-center">
+                          <div className={`text-4xl font-bold ${wikiLintResult.healthScore >= 80 ? 'text-green-600' : wikiLintResult.healthScore >= 60 ? 'text-yellow-600' : 'text-red-600'}`}>
+                            {wikiLintResult.healthScore}
+                          </div>
+                          <div className="text-xs text-slate-500">Health Score</div>
+                        </div>
+                        <div className="flex-1">
+                          <div className="text-sm font-medium text-slate-700 mb-1">
+                            {wikiLintResult.issues.length} issues found
+                          </div>
+                          <div className="text-xs text-slate-500">
+                            {wikiLintResult.suggestions.length} suggestions for improvement
+                          </div>
+                        </div>
+                      </div>
+
+                      {wikiLintResult.issues.length > 0 && (
+                        <div className="mb-6">
+                          <h3 className="text-sm font-semibold text-slate-700 mb-3">Issues</h3>
+                          <div className="space-y-2">
+                            {wikiLintResult.issues.map((issue, i) => (
+                              <div key={i} className="p-3 bg-amber-50 border border-amber-200 rounded-xl">
+                                <div className="flex items-start gap-2">
+                                  <span className="text-xs bg-amber-200 text-amber-800 px-1.5 py-0.5 rounded font-medium">{issue.type}</span>
+                                  <span className="text-xs text-slate-500">{issue.page}</span>
+                                </div>
+                                <p className="text-sm text-slate-700 mt-1">{issue.description}</p>
+                                <p className="text-xs text-slate-500 mt-1">→ {issue.suggestion}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {wikiLintResult.suggestions.length > 0 && (
+                        <div>
+                          <h3 className="text-sm font-semibold text-slate-700 mb-3">Suggestions</h3>
+                          <ul className="space-y-1">
+                            {wikiLintResult.suggestions.map((s, i) => (
+                              <li key={i} className="text-sm text-slate-600 flex items-start gap-2">
+                                <Sparkles className="w-4 h-4 text-indigo-400 flex-shrink-0 mt-0.5" />
+                                {s}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

@@ -118,3 +118,58 @@ You have been provided with pricing and business strategy materials. Your role:
 Your teaching style: High-energy, intellectually rigorous, occasionally provocative. You challenge students to think like CEOs and pricing strategists, not just economists. You make pricing feel like the most exciting strategic lever in business.
 
 Start with an engaging introduction that previews the key pricing insights you'll be exploring together.`
+
+export const WIKI_SCHEMA = `
+Wiki structure conventions:
+- sources/{slug}.md — one page per ingested source (summary + key points)
+- concepts/{slug}.md — one page per concept, theory, or framework
+- entities/{slug}.md — one page per person, company, or case study
+- index.md — catalog of ALL pages, one line per page with a brief description
+- log.md — append-only log, each entry: ## [{YYYY-MM-DD}] ingest | {title}
+
+Page format:
+- Start with # Title
+- Use ## sections
+- Link to related pages with [[Page Name]] notation for cross-references
+- Keep pages focused and well cross-referenced
+`
+
+export const WIKI_INGEST_PROMPT = `You are maintaining a personal study wiki. ${WIKI_SCHEMA}
+
+You will be given a new source document. Process it and return ONLY a valid JSON object (no markdown, no explanation) with all pages to create or update:
+
+{
+  "title": "Human-readable title of the source",
+  "pages": {
+    "sources/source-slug.md": "# Source Title\\n\\ncontent...",
+    "concepts/concept-slug.md": "# Concept\\n\\ncontent...",
+    "index.md": "# Index\\n\\n(complete updated index)",
+    "log.md": "# Log\\n\\n(complete log with new entry appended)"
+  }
+}
+
+Rules:
+- For index.md and log.md: return the COMPLETE updated content
+- For concept/entity pages: if the page already exists (provided in context), UPDATE it by integrating new information
+- Create a source summary page AND update/create relevant concept and entity pages
+- Cross-reference liberally using [[Page Name]] notation
+- Today's date: ${new Date().toISOString().split('T')[0]}
+`
+
+export const WIKI_QUERY_PROMPT = `You are answering a question using a personal study wiki. Answer thoroughly, citing specific pages from the wiki. Be precise and educational. If the answer would make a useful standalone wiki page, mention it at the end.`
+
+export const WIKI_LINT_PROMPT = `You are health-checking a personal study wiki. Analyze all provided pages and return ONLY valid JSON (no markdown):
+
+{
+  "healthScore": 85,
+  "issues": [
+    {
+      "type": "orphan" | "contradiction" | "missing-concept" | "stale" | "broken-link",
+      "page": "path/to/page.md",
+      "description": "description of issue",
+      "suggestion": "how to fix it"
+    }
+  ],
+  "suggestions": ["New source to find: ...", "Consider adding a page about ..."]
+}
+`

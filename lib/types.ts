@@ -17,6 +17,7 @@ export interface Subject {
   name: string
   files: StoredFile[]
   urls: SubjectURL[]
+  wiki?: SubjectWiki
 }
 
 export interface ChatMessage {
@@ -25,10 +26,21 @@ export interface ChatMessage {
   timestamp: number
 }
 
+export interface WikiPage {
+  path: string        // e.g. "sources/barco.md"
+  content: string     // markdown
+  updatedAt: number
+}
+
+export interface SubjectWiki {
+  pages: Record<string, WikiPage>  // path -> WikiPage
+}
+
 export interface AppState {
   apiKey: string
   subjects: Record<string, Subject>
   activeSubject: string
   chatHistories: Record<string, ChatMessage[]>
   ttsEnabled: boolean
+  wikis: Record<string, SubjectWiki>  // subject name -> wiki
 }
